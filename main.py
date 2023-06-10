@@ -1,11 +1,88 @@
-import argparse
-import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import platform
 import logging
+import websockets
+import names
+from websockets import WebSocketServerProtocol
+from websockets.exceptions import ConnectionClosedOK
 
 import aiohttp
 import asyncio
+from aiopath import AsyncPath
+from aiofile import async_open
+
+
+class WebSockServer:
+    clients = set()
+
+    async def register(self, ws: WebSocketServerProtocol):
+        ws.name = names.get_full_name()
+        self.clients.add(ws)
+        logging.info(f'{ws.remote_address} connects')
+
+    async def unregister(self, ws: WebSocketServerProtocol):
+        self.clients.remove(ws)
+        logging.info(f'{ws.remote_address} disconnects')
+
+    async def send_to_clients(self, message: str):
+        if self.clients:
+            [await client.send(message) for client in self.clients]
+
+    async def ws_handler(self, ws: WebSocketServerProtocol):
+        await self.register(ws)
+        try:
+            await self.distribute(ws)
+        except ConnectionClosedOK:
+            pass
+        finally:
+            await self.unregister(ws)
+
+    async def distribute(self, ws: WebSocketServerProtocol):
+        async for message in ws:
+            await self.send_to_clients(f"{ws.name}: {message}")
+            if message.lower().startswith("exchange"):
+                await self.send_to_clients("Making a request to pb.ua API...")
+                exchange_history = await self.exchange_handler(message.lower())
+                if exchange_history is not None:
+                    await self.send_to_clients(exchange_history)
+
+    async def exchange_handler(self, message):
+        await self.log_exchange_request(message)
+        try:
+            command, days = message.strip().split()
+            exch_history = ExchangeRateHistory(int(days))
+        except ValueError:
+            return "The correct command is: exchange <days_number>"
+        else:
+            raw_result = await exch_history.get_exchange_history()
+            await self.log_exchange_request(raw_result)
+            return self.get_pretty_result(raw_result)
+
+    @staticmethod
+    async def log_exchange_request(text):
+        log_dir = AsyncPath("logs")
+        await log_dir.mkdir(exist_ok=True, parents=True)
+        async with async_open(log_dir / AsyncPath("exchange_log.log"), "a") as log_file:
+            await log_file.write(f"[{datetime.now()}] => ")
+            await log_file.write(f"{text}\n")
+
+    @staticmethod
+    def get_pretty_result(raw_result):
+        logging.debug(type(raw_result))
+
+        result = f'<div class="exchange-history">'
+        result += f'<h4>Exchange history</h4>'
+        result += f'<div class="content"><ul>'
+        for date_entry in raw_result:
+            result += f'<li><span class="date">{list(date_entry.keys())[0]}</span><ul>'
+            for currency, rates in date_entry[list(date_entry.keys())[0]].items():
+                result += f'<li><span class="currency-code">{currency}</span> => '
+                result += f'<span class="rates">sale: {rates["sale"]}, purchase: {rates["purchase"]}</span></li>'
+            result += '</ul></li>'
+
+        result += '</ul></div></div>'
+
+        return result
 
 
 class ExchangeRateHistory:
@@ -81,30 +158,16 @@ class ExchangeRateHistory:
             return await asyncio.gather(*responses)
 
 
-def init_argparse():
-    parser = argparse.ArgumentParser(prog="Privatbank exchange rate history")
-    parser.add_argument('days', type=int, help=f'how many days the history should be retrieved for')
-    parser.add_argument('-c', '--currency', help='currency code', action='append',
-                        default=ExchangeRateHistory.DEFAULT_CURRENCIES)
-    args = parser.parse_args()
-
-    return args
-
-
-def main():
+async def main():
     logging.basicConfig(level=None)
 
-    args = init_argparse()
-
-    exch_history = ExchangeRateHistory(args.days)
-    exch_history.currencies = args.currency
-
-    try:
-        if currency_results := asyncio.run(exch_history.get_exchange_history()):
-            print(json.dumps(currency_results, indent=2))
-    except (KeyboardInterrupt, EOFError):
-        print("Interrupted by user.")
+    server = WebSockServer()
+    async with websockets.serve(server.ws_handler, 'localhost', 8080):
+        await asyncio.Future()  # run forever
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, EOFError):
+        print("The server has been shutdown by the user.")
