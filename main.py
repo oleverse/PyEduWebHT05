@@ -1,6 +1,6 @@
+import argparse
 import json
-import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 import platform
 import logging
 
@@ -11,9 +11,10 @@ import asyncio
 class ExchangeRateHistory:
     EXCHANGE_HISTORY_DEPTH = 10
     DATE_FORMAT = '%d.%m.%Y'
-    CURRENCIES = ["USD", "EUR"]
+    DEFAULT_CURRENCIES = ["USD", "EUR"]
 
     def __init__(self, days_count: int):
+        self.__currencies = self.DEFAULT_CURRENCIES
         self.__history_days_count = days_count
         self.__base_url = "http://api.privatbank.ua"
         self.__win_async_prepare()
@@ -30,7 +31,9 @@ class ExchangeRateHistory:
 
     def __format_exchange_result(self, full_result):
         try:
-            filtered = filter(lambda c: c["currency"] in self.CURRENCIES, full_result["exchangeRate"])
+            logging.debug(full_result)
+            logging.debug(self.currencies)
+            filtered = filter(lambda c: c["currency"] in self.currencies, full_result["exchangeRate"])
             return {
                 full_result["date"]: {
                     entry["currency"]: {
@@ -41,6 +44,14 @@ class ExchangeRateHistory:
             }
         except KeyError as ex:
             print(f"Key {ex} does not exist.")
+
+    @property
+    def currencies(self):
+        return self.__currencies
+
+    @currencies.setter
+    def currencies(self, currencies):
+        self.__currencies = currencies
 
     @staticmethod
     def __win_async_prepare():
@@ -70,28 +81,26 @@ class ExchangeRateHistory:
             return await asyncio.gather(*responses)
 
 
-def get_script_argument():
-    if args_count := len(sys.argv[1:]):
-        if args_count > 2:
-            logging.debug("Script should have only one argument, odd ones are ignored.")
+def init_argparse():
+    parser = argparse.ArgumentParser(prog="Privatbank exchange rate history")
+    parser.add_argument('days', type=int, help=f'how many days the history should be retrieved for')
+    parser.add_argument('-c', '--currency', help='currency code', action='append',
+                        default=ExchangeRateHistory.DEFAULT_CURRENCIES)
+    args = parser.parse_args()
 
-        try:
-            return int(sys.argv[1])
-        except ValueError:
-            print("You should enter a decimal number.")
+    return args
 
 
 def main():
     logging.basicConfig(level=None)
 
-    if (days := get_script_argument()) is None:
-        print("Bad argument.")
-        return False
+    args = init_argparse()
 
-    exch_rate = ExchangeRateHistory(days)
+    exch_history = ExchangeRateHistory(args.days)
+    exch_history.currencies = args.currency
 
     try:
-        if currency_results := asyncio.run(exch_rate.get_exchange_history()):
+        if currency_results := asyncio.run(exch_history.get_exchange_history()):
             print(json.dumps(currency_results, indent=2))
     except (KeyboardInterrupt, EOFError):
         print("Interrupted by user.")
